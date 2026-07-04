@@ -1,0 +1,27 @@
+# Example Makefile integration for struct-codegen
+
+# Install the code generator
+.PHONY: install-codegen
+install-codegen:
+	go install github.com/sladkoelllka/struct-codogen-ts/cmd/struct-codegen-ts@latest
+	go install github.com/sladkoelllka/struct-codogen-ts/cmd/error-codegen-ts@latest
+
+# Generate TypeScript types from domain structures
+.PHONY: generate-types
+generate-types:
+	struct-codegen -input ./internal/domain -output ../frontend/src/api/types.ts
+
+# Generate with custom configuration
+.PHONY: generate-types-types
+generate-types-types:
+	struct-codegen -input ./internal/domain -output ../frontend/src/api/types.ts -type type
+
+# Generate TypeScript error codes
+.PHONY: generate-errors
+generate-errors:
+	error-codegen-ts -input ./internal/apperrs -output ../frontend/src/api/errorCodes.ts
+
+# Example watch task (requires entr or similar)
+.PHONY: watch-types
+watch-types:
+	ls internal/domain/**/*.go | entr make generate-types
