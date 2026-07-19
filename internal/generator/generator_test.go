@@ -630,6 +630,7 @@ type UpdateProviderRoleMappingRequest struct {
 	ExternalGroup *string ` + "`json:\"external_group\" binding:\"omitempty,min=1,max=512\"`" + `
 	RoleID        *int64  ` + "`json:\"role_id\" binding:\"omitempty,gt=0\"`" + `
 	Config        json.RawMessage ` + "`json:\"config\" binding:\"required\"`" + `
+	Inputs        map[string]json.RawMessage ` + "`json:\"inputs\" binding:\"required\"`" + `
 }
 
 type CreateUserRequest struct {
@@ -655,8 +656,11 @@ type CreateUserRequest struct {
 
 	var typeContent string
 	var schemaContent string
+	var utilsContent string
 	for _, output := range outputs {
 		switch output.Path {
+		case filepath.Join("/tmp/generated", "utils.ts"):
+			utilsContent = output.Content
 		case filepath.Join("/tmp/generated", "unknown", file.Type+".ts"):
 			typeContent = output.Content
 		case filepath.Join("/tmp/generated", "unknown", file.Type+".schema.ts"):
@@ -665,8 +669,9 @@ type CreateUserRequest struct {
 	}
 
 	expectedTypeSnippets := []string{
-		`export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];`,
+		`import type { JsonValue } from '../utils';`,
 		`config: JsonValue;`,
+		`inputs: Record<string, JsonValue>;`,
 		`export interface CreateUserRequest {`,
 	}
 
@@ -677,8 +682,13 @@ type CreateUserRequest struct {
 	}
 
 	unexpectedTypeSnippets := []string{
+		`export type JsonValue =`,
 		`import { z } from 'zod';`,
 		`CreateUserRequestSchema`,
+	}
+
+	if !strings.Contains(utilsContent, jsonValueTypeDef) {
+		t.Fatalf("expected shared JsonValue definition in utils.ts, got:\n%s", utilsContent)
 	}
 	for _, snippet := range unexpectedTypeSnippets {
 		if strings.Contains(typeContent, snippet) {
