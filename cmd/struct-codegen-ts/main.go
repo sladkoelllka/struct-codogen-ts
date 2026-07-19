@@ -219,9 +219,10 @@ func collectImportedStructFiles(primaryFiles []*parser.File) []*parser.File {
 				if seenPaths[depFile.Path] {
 					continue
 				}
-				if !fileHasJSONTaggedStruct(depFile) {
+				if !fileHasPublicTaggedStruct(depFile) {
 					continue
 				}
+				depFile = filterPublicStructFile(depFile)
 				seenPaths[depFile.Path] = true
 				result = append(result, depFile)
 				queue = append(queue, depFile)
@@ -230,6 +231,135 @@ func collectImportedStructFiles(primaryFiles []*parser.File) []*parser.File {
 	}
 
 	return result
+}
+
+func filterPublicStructFile(file *parser.File) *parser.File {
+	typeByName := make(map[string]parser.Struct, len(file.Structs))
+	for _, strct := range file.Structs {
+		typeByName[strct.Name] = strct
+	}
+
+	included := make(map[string]bool)
+	queue := make([]string, 0, len(file.Structs))
+	for _, strct := range file.Structs {
+		if !structHasPublicTaggedFields(strct) {
+			continue
+		}
+		included[strct.Name] = true
+		queue = append(queue, strct.Name)
+	}
+
+	for i := 0; i < len(queue); i++ {
+		strct := typeByName[queue[i]]
+		for _, typeName := range localTypeRefs(strct) {
+			ref, ok := typeByName[typeName]
+			if !ok || included[typeName] {
+				continue
+			}
+			if len(ref.Fields) > 0 && !structHasPublicTaggedFields(ref) {
+				continue
+			}
+			included[typeName] = true
+			queue = append(queue, typeName)
+		}
+	}
+
+	filtered := *file
+	filtered.Structs = make([]parser.Struct, 0, len(file.Structs))
+	for _, strct := range file.Structs {
+		if included[strct.Name] {
+			filtered.Structs = append(filtered.Structs, strct)
+		}
+	}
+
+	return &filtered
+}
+
+func localTypeRefs(strct parser.Struct) []string {
+	seen := make(map[string]bool)
+	addLocalTypeRefs(seen, strct.AliasType)
+	for _, field := range strct.Fields {
+		addLocalTypeRefs(seen, field.Type)
+	}
+
+	result := make([]string, 0, len(seen))
+	for typeName := range seen {
+		result = append(result, typeName)
+	}
+	return result
+}
+
+func addLocalTypeRefs(seen map[string]bool, rawType string) {
+	for _, typeName := range localTypeNames(rawType) {
+		seen[typeName] = true
+	}
+}
+
+func localTypeNames(rawType string) []string {
+	rawType = strings.TrimSpace(rawType)
+	rawType = strings.TrimPrefix(rawType, "*")
+	for strings.HasPrefix(rawType, "[]") {
+		rawType = strings.TrimPrefix(rawType, "[]")
+		rawType = strings.TrimPrefix(rawType, "*")
+	}
+	if rawType == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(rawType, "map[") {
+		_, valueType, ok := splitMapType(rawType)
+		if !ok {
+			return nil
+		}
+		return localTypeNames(valueType)
+	}
+
+	if baseType, typeArg, ok := splitGenericType(rawType); ok {
+		names := localTypeNames(baseType)
+		names = append(names, localTypeNames(typeArg)...)
+		return names
+	}
+
+	if strings.Contains(rawType, ".") || isBuiltInType(rawType) {
+		return nil
+	}
+
+	return []string{rawType}
+}
+
+func splitMapType(rawType string) (string, string, bool) {
+	if !strings.HasPrefix(rawType, "map[") {
+		return "", "", false
+	}
+	end := strings.Index(rawType, "]")
+	if end < 0 || end+1 >= len(rawType) {
+		return "", "", false
+	}
+	return rawType[4:end], rawType[end+1:], true
+}
+
+func splitGenericType(rawType string) (string, string, bool) {
+	start := strings.Index(rawType, "[")
+	if start < 0 || !strings.HasSuffix(rawType, "]") {
+		return "", "", false
+	}
+	baseType := strings.TrimSpace(rawType[:start])
+	typeArg := strings.TrimSpace(strings.TrimSuffix(rawType[start+1:], "]"))
+	if baseType == "" || typeArg == "" || strings.Contains(typeArg, ",") {
+		return "", "", false
+	}
+	return baseType, typeArg, true
+}
+
+func isBuiltInType(typeName string) bool {
+	switch typeName {
+	case "string", "bool", "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"float32", "float64", "interface{}", "any":
+		return true
+	default:
+		return false
+	}
 }
 
 func usesImportedPackage(file *parser.File, importName string) bool {
@@ -248,15 +378,22 @@ func usesImportedPackage(file *parser.File, importName string) bool {
 	return false
 }
 
-func fileHasJSONTaggedStruct(file *parser.File) bool {
+func fileHasPublicTaggedStruct(file *parser.File) bool {
 	for _, strct := range file.Structs {
-		for _, field := range strct.Fields {
-			if field.JSONTag != "" {
-				return true
-			}
+		if structHasPublicTaggedFields(strct) {
+			return true
 		}
 	}
 
+	return false
+}
+
+func structHasPublicTaggedFields(strct parser.Struct) bool {
+	for _, field := range strct.Fields {
+		if field.JSONTag != "" || field.UriTag != "" || field.FormTag != "" {
+			return true
+		}
+	}
 	return false
 }
 

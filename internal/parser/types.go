@@ -19,6 +19,7 @@ type Struct struct {
 	Fields    []Field // Список полей структуры
 	Comment   string  // Комментарий перед struct (если есть)
 	AliasType string  // Целевой тип для alias (например, dto.LoginResponse)
+	Values    []string
 }
 
 // File представляет распарсенный Go файл

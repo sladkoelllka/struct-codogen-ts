@@ -59,9 +59,17 @@ func (g *Generator) generateFileContent(file *parser.File) string {
 
 // generateStruct генерирует TypeScript interface/type для одной структуры
 func (g *Generator) generateStruct(sb *strings.Builder, strct parser.Struct, nameMap map[string]string) {
+	g.generateStructWithImports(sb, strct, nameMap, nil)
+}
+
+func (g *Generator) generateStructWithImports(sb *strings.Builder, strct parser.Struct, nameMap map[string]string, imports map[string]typeImport) {
 	selfName := resolveStructName(strct, nameMap)
 	if strct.AliasType != "" {
-		fmt.Fprintf(sb, "export type %s = %s;\n", selfName, goTypeToTS(strct.AliasType))
+		if len(strct.Values) > 0 {
+			fmt.Fprintf(sb, "export type %s = %s;\n", selfName, stringUnionType(strct.Values))
+			return
+		}
+		fmt.Fprintf(sb, "export type %s = %s;\n", selfName, goTypeToTSWithImports(strct.AliasType, imports))
 		return
 	}
 
@@ -103,7 +111,7 @@ func (g *Generator) generateStruct(sb *strings.Builder, strct parser.Struct, nam
 			optional = "?"
 		}
 
-		fmt.Fprintf(sb, "  %s%s: %s;\n", fieldName, optional, goTypeToTS(field.Type))
+		fmt.Fprintf(sb, "  %s%s: %s;\n", fieldName, optional, goTypeToTSWithImports(field.Type, imports))
 	}
 
 	if g.config.ExportType == "interface" {
@@ -144,10 +152,7 @@ func (g *Generator) GeneratePerFile(files []*parser.File, outputDir string) []Fi
 		}
 
 		for _, strct := range file.Structs {
-			if isNoopSelectorAlias(strct) {
-				continue
-			}
-			g.generateStruct(&sb, strct, nil)
+			g.generateStructWithImports(&sb, strct, nil, imports)
 			sb.WriteString("\n")
 		}
 
@@ -176,6 +181,22 @@ func generateSchemaFileContent(file *parser.File) string {
 	}
 
 	return sb.String()
+}
+
+func stringUnionType(values []string) string {
+	quotedValues := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		quotedValues = append(quotedValues, strconv.Quote(value))
+	}
+	if len(quotedValues) == 0 {
+		return "string"
+	}
+	return strings.Join(quotedValues, " | ")
 }
 
 func buildStructNameMap(structs []parser.Struct) map[string]string {
@@ -209,24 +230,19 @@ func buildStructToFileMap(files []*parser.File, outputDir string) map[string]str
 	return structToFile
 }
 
-func collectImports(file *parser.File, filePath string, structToFile map[string]string) map[string]string {
-	imports := make(map[string]string)
+type typeImport struct {
+	ExportedName string
+	LocalName    string
+	Path         string
+}
+
+func collectImports(file *parser.File, filePath string, structToFile map[string]string) map[string]typeImport {
+	imports := make(map[string]typeImport)
+	localTypes := fileTypeNames(file)
 
 	for _, strct := range file.Structs {
 		if strct.AliasType != "" {
-			targetKey := resolveStructFileKey(file, strct.AliasType)
-			baseType := baseFieldType(strct.AliasType)
-			target, ok := structToFile[targetKey]
-			if ok && target != filePath {
-				relPath, err := filepath.Rel(filepath.Dir(filePath), target)
-				if err == nil {
-					if !strings.HasPrefix(relPath, ".") {
-						relPath = "./" + relPath
-					}
-					relPath = filepath.ToSlash(relPath)
-					imports[baseType] = strings.TrimSuffix(relPath, ".ts")
-				}
-			}
+			addImport(imports, file, filePath, structToFile, localTypes, strct.AliasType)
 		}
 
 		for _, field := range strct.Fields {
@@ -234,27 +250,78 @@ func collectImports(file *parser.File, filePath string, structToFile map[string]
 				continue
 			}
 
-			targetKey := resolveStructFileKey(file, field.Type)
-			baseType := baseFieldType(field.Type)
-			target, ok := structToFile[targetKey]
-			if !ok || target == filePath {
-				continue
-			}
-
-			relPath, err := filepath.Rel(filepath.Dir(filePath), target)
-			if err != nil {
-				continue
-			}
-			if !strings.HasPrefix(relPath, ".") {
-				relPath = "./" + relPath
-			}
-			relPath = filepath.ToSlash(relPath)
-
-			imports[baseType] = strings.TrimSuffix(relPath, ".ts")
+			addImport(imports, file, filePath, structToFile, localTypes, field.Type)
 		}
 	}
 
 	return imports
+}
+
+func fileTypeNames(file *parser.File) map[string]bool {
+	names := make(map[string]bool, len(file.Structs))
+	for _, strct := range file.Structs {
+		names[strct.Name] = true
+	}
+	return names
+}
+
+func addImport(imports map[string]typeImport, file *parser.File, filePath string, structToFile map[string]string, localTypes map[string]bool, rawType string) {
+	rawType = strings.TrimSpace(rawType)
+	if rawType == "" {
+		return
+	}
+	if strings.HasPrefix(rawType, "*") {
+		addImport(imports, file, filePath, structToFile, localTypes, rawType[1:])
+		return
+	}
+	if strings.HasPrefix(rawType, "[]") {
+		addImport(imports, file, filePath, structToFile, localTypes, rawType[2:])
+		return
+	}
+	if keyType, valueType, ok := mapType(rawType); ok {
+		addImport(imports, file, filePath, structToFile, localTypes, keyType)
+		addImport(imports, file, filePath, structToFile, localTypes, valueType)
+		return
+	}
+	if baseType, typeArg, ok := genericType(rawType); ok {
+		addImport(imports, file, filePath, structToFile, localTypes, baseType)
+		addImport(imports, file, filePath, structToFile, localTypes, typeArg)
+		return
+	}
+
+	targetKey := resolveStructFileKey(file, rawType)
+	baseType := baseFieldType(rawType)
+	target, ok := structToFile[targetKey]
+	if !ok || target == filePath {
+		return
+	}
+
+	relPath, err := filepath.Rel(filepath.Dir(filePath), target)
+	if err != nil {
+		return
+	}
+	if !strings.HasPrefix(relPath, ".") {
+		relPath = "./" + relPath
+	}
+	relPath = filepath.ToSlash(relPath)
+
+	localName := baseType
+	if localTypes[baseType] {
+		localName = importAliasName(rawType, baseType)
+	}
+
+	imports[baseType] = typeImport{
+		ExportedName: baseType,
+		LocalName:    localName,
+		Path:         strings.TrimSuffix(relPath, ".ts"),
+	}
+}
+
+func importAliasName(rawType, baseType string) string {
+	if pkgRef, ok := packageRef(rawType); ok {
+		return strings.Title(pkgRef) + baseType
+	}
+	return "Imported" + baseType
 }
 
 func resolveStructFileKey(file *parser.File, rawType string) string {
@@ -309,7 +376,7 @@ func extractEntityFromImportPath(importPath string) string {
 	return "unknown"
 }
 
-func writeImports(sb *strings.Builder, imports map[string]string) {
+func writeImports(sb *strings.Builder, imports map[string]typeImport) {
 	typeNames := make([]string, 0, len(imports))
 	for typeName := range imports {
 		typeNames = append(typeNames, typeName)
@@ -317,17 +384,13 @@ func writeImports(sb *strings.Builder, imports map[string]string) {
 	sort.Strings(typeNames)
 
 	for _, typeName := range typeNames {
-		importPath := imports[typeName]
-		fmt.Fprintf(sb, "import type { %s } from '%s';\n", typeName, importPath)
+		typeImport := imports[typeName]
+		if typeImport.LocalName != typeImport.ExportedName {
+			fmt.Fprintf(sb, "import type { %s as %s } from '%s';\n", typeImport.ExportedName, typeImport.LocalName, typeImport.Path)
+			continue
+		}
+		fmt.Fprintf(sb, "import type { %s } from '%s';\n", typeImport.ExportedName, typeImport.Path)
 	}
-}
-
-func isNoopSelectorAlias(strct parser.Struct) bool {
-	if strct.AliasType == "" || !strings.Contains(strct.AliasType, ".") {
-		return false
-	}
-
-	return strct.Name == goTypeToTS(strct.AliasType)
 }
 
 func outputPathForFile(file *parser.File, outputDir string) string {
@@ -697,6 +760,10 @@ func toExportName(pkg, name string) string {
 
 // goTypeToTS преобразует Go тип в TypeScript тип
 func goTypeToTS(goType string) string {
+	return goTypeToTSWithImports(goType, nil)
+}
+
+func goTypeToTSWithImports(goType string, imports map[string]typeImport) string {
 	goType = strings.TrimSpace(goType)
 
 	if strings.HasPrefix(goType, "*") {
@@ -704,11 +771,15 @@ func goTypeToTS(goType string) string {
 	}
 
 	if strings.HasPrefix(goType, "[]") {
-		return goTypeToTS(goType[2:]) + "[]"
+		return goTypeToTSWithImports(goType[2:], imports) + "[]"
+	}
+
+	if keyType, valueType, ok := mapType(goType); ok {
+		return "Record<" + recordKeyType(keyType, imports) + ", " + goTypeToTSWithImports(valueType, imports) + ">"
 	}
 
 	if baseType, typeArg, ok := genericType(goType); ok {
-		return goTypeToTS(baseType) + "<" + goTypeToTS(typeArg) + ">"
+		return goTypeToTSWithImports(baseType, imports) + "<" + goTypeToTSWithImports(typeArg, imports) + ">"
 	}
 
 	switch goType {
@@ -733,11 +804,70 @@ func goTypeToTS(goType string) string {
 	default:
 		if strings.Contains(goType, ".") {
 			parts := strings.Split(goType, ".")
-			return parts[len(parts)-1]
+			typeName := parts[len(parts)-1]
+			if typeImport, ok := imports[typeName]; ok {
+				return typeImport.LocalName
+			}
+			return typeName
 		}
 
 		return goType
 	}
+}
+
+func mapType(goType string) (string, string, bool) {
+	goType = strings.TrimSpace(goType)
+	if !strings.HasPrefix(goType, "map[") {
+		return "", "", false
+	}
+
+	end := matchingBracketIndex(goType, 3)
+	if end < 0 || end+1 >= len(goType) {
+		return "", "", false
+	}
+
+	keyType := strings.TrimSpace(goType[4:end])
+	valueType := strings.TrimSpace(goType[end+1:])
+	if keyType == "" || valueType == "" {
+		return "", "", false
+	}
+
+	return keyType, valueType, true
+}
+
+func matchingBracketIndex(value string, open int) int {
+	if open < 0 || open >= len(value) || value[open] != '[' {
+		return -1
+	}
+
+	depth := 0
+	for i := open; i < len(value); i++ {
+		switch value[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+func recordKeyType(goType string, imports map[string]typeImport) string {
+	keyType := goTypeToTSWithImports(goType, imports)
+	switch keyType {
+	case "string", "number", "symbol":
+		return keyType
+	}
+
+	if strings.Contains(keyType, "|") || strings.Contains(keyType, "&") || strings.Contains(keyType, "[]") {
+		return "string"
+	}
+
+	return keyType
 }
 
 func genericType(goType string) (string, string, bool) {

@@ -122,6 +122,104 @@ type Response struct {
 	}
 }
 
+func TestGenerateMapTypesAsRecord(t *testing.T) {
+	tmp, err := os.CreateTemp("", "maps_*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+
+	_, err = tmp.WriteString(`package dto
+
+type Child struct {
+	Name string ` + "`json:\"name\"`" + `
+}
+
+type Response struct {
+	Meta     map[string]int64 ` + "`json:\"meta\"`" + `
+	Children map[string][]*Child ` + "`json:\"children\"`" + `
+	Nested   map[string]map[string]string ` + "`json:\"nested\"`" + `
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp.Close()
+
+	file, err := parser.ParseFile(tmp.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := NewGenerator(GeneratorConfig{ExportType: "interface"})
+	out := g.generateFileContent(file)
+
+	expected := []string{
+		`meta: Record<string, number>;`,
+		`children: Record<string, Child[]>;`,
+		`nested: Record<string, Record<string, string>>;`,
+	}
+
+	for _, snippet := range expected {
+		if !strings.Contains(out, snippet) {
+			t.Fatalf("expected output to contain %q, got:\n%s", snippet, out)
+		}
+	}
+}
+
+func TestGenerateNamedStringTypes(t *testing.T) {
+	tmp, err := os.CreateTemp("", "named_string_*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+
+	_, err = tmp.WriteString(`package dto
+
+type FindingsFilter struct {
+	HostIP    *string               ` + "`form:\"host_ip\"`" + `
+	OrderBy   *FindingFilterOrderBy ` + "`form:\"order_by\"`" + `
+	SortOrder *SortOrder           ` + "`form:\"sort_order\"`" + `
+}
+
+type FindingFilterOrderBy string
+
+const (
+	FindingFilterOrderByHostIP  FindingFilterOrderBy = "ip"
+	FindingFilterOrderByHostMac FindingFilterOrderBy = "mac"
+)
+
+type SortOrder string
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp.Close()
+
+	file, err := parser.ParseFile(tmp.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := NewGenerator(GeneratorConfig{ExportType: "interface"})
+	out := g.generateFileContent(file)
+
+	expected := []string{
+		`export interface FindingsFilter {`,
+		`host_ip?: string;`,
+		`order_by?: FindingFilterOrderBy;`,
+		`sort_order?: SortOrder;`,
+		`export type FindingFilterOrderBy = "ip" | "mac";`,
+		`export type SortOrder = string;`,
+	}
+
+	for _, snippet := range expected {
+		if !strings.Contains(out, snippet) {
+			t.Fatalf("expected output to contain %q, got:\n%s", snippet, out)
+		}
+	}
+}
+
 func TestGeneratePerFileAliasImportsSelectorType(t *testing.T) {
 	g := NewGenerator(GeneratorConfig{ExportType: "interface"})
 
@@ -169,6 +267,64 @@ func TestGeneratePerFileAliasImportsSelectorType(t *testing.T) {
 
 	if !strings.Contains(responseContent, "export type CreateAdminResponse = LoginResponse;") {
 		t.Fatalf("expected selector alias export, got:\n%s", responseContent)
+	}
+}
+
+func TestGeneratePerFileMapValueImportsSelectorType(t *testing.T) {
+	g := NewGenerator(GeneratorConfig{ExportType: "interface"})
+
+	files := []*parser.File{
+		{
+			Entity:   "admin",
+			Type:     "response",
+			Generate: true,
+			Imports: map[string]string{
+				"dto": "gitlab.legion.devel/legion/helpdesk-server/internal/delivery/handler/auth/dto",
+			},
+			Structs: []parser.Struct{
+				{
+					Name:    "AdminResponse",
+					Package: "dto",
+					Fields: []parser.Field{
+						{Name: "Sessions", Type: "map[string]dto.LoginResponse", JSONTag: "sessions"},
+					},
+				},
+			},
+		},
+		{
+			Entity:   "auth",
+			Type:     "login",
+			Generate: false,
+			Structs: []parser.Struct{
+				{
+					Name:    "LoginResponse",
+					Package: "dto",
+					Fields: []parser.Field{
+						{Name: "Token", Type: "string", JSONTag: "token"},
+					},
+				},
+			},
+		},
+	}
+
+	outputs := g.GeneratePerFile(files, "/tmp/generated")
+
+	var responseContent string
+	for _, output := range outputs {
+		if output.Path == filepath.Join("/tmp/generated", "admin", "response.ts") {
+			responseContent = output.Content
+			break
+		}
+	}
+
+	if !strings.Contains(responseContent, "import type { LoginResponse } from '../auth/login';") {
+		t.Fatalf("expected selector map value import, got:\n%s", responseContent)
+	}
+	if !strings.Contains(responseContent, "sessions: Record<string, LoginResponse>;") {
+		t.Fatalf("expected selector map value to be generated as Record, got:\n%s", responseContent)
+	}
+	if strings.Contains(responseContent, "dto.LoginResponse") {
+		t.Fatalf("unexpected Go selector in generated TypeScript, got:\n%s", responseContent)
 	}
 }
 
@@ -292,7 +448,7 @@ func TestGeneratePerFileImportsEmbeddedSelectorType(t *testing.T) {
 	}
 }
 
-func TestGeneratePerFileSkipsNoopSelectorAlias(t *testing.T) {
+func TestGeneratePerFileAliasesSameNameSelectorType(t *testing.T) {
 	g := NewGenerator(GeneratorConfig{ExportType: "interface"})
 
 	files := []*parser.File{
@@ -342,16 +498,68 @@ func TestGeneratePerFileSkipsNoopSelectorAlias(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(responseContent, "import type { RoleRef } from '../user/user';") {
-		t.Fatalf("expected noop selector alias import, got:\n%s", responseContent)
+	if !strings.Contains(responseContent, "import type { RoleRef as DtoRoleRef } from '../user/user';") {
+		t.Fatalf("expected same-name selector alias import, got:\n%s", responseContent)
 	}
 
 	if !strings.Contains(responseContent, "role: RoleRef;") {
-		t.Fatalf("expected aliased field to use imported RoleRef, got:\n%s", responseContent)
+		t.Fatalf("expected field to use local RoleRef alias, got:\n%s", responseContent)
 	}
 
-	if strings.Contains(responseContent, "export type RoleRef = RoleRef;") {
-		t.Fatalf("unexpected self-referential alias, got:\n%s", responseContent)
+	if !strings.Contains(responseContent, "export type RoleRef = DtoRoleRef;") {
+		t.Fatalf("expected non-self-referential alias export, got:\n%s", responseContent)
+	}
+}
+
+func TestGeneratePerFileAliasesSameNameReadmodelType(t *testing.T) {
+	g := NewGenerator(GeneratorConfig{ExportType: "interface"})
+
+	files := []*parser.File{
+		{
+			Entity:   "ticket",
+			Type:     "request",
+			Generate: true,
+			Imports: map[string]string{
+				"readmodel": "gitlab.legion.devel/legion/helpdesk-server/internal/readmodel",
+			},
+			Structs: []parser.Struct{
+				{Name: "Filter", Package: "dto", AliasType: "readmodel.Filter"},
+			},
+		},
+		{
+			Entity:   "readmodel",
+			Type:     "filter",
+			Generate: true,
+			Structs: []parser.Struct{
+				{
+					Name:    "Filter",
+					Package: "readmodel",
+					Fields: []parser.Field{
+						{Name: "Status", Type: "string", JSONTag: "status"},
+					},
+				},
+			},
+		},
+	}
+
+	outputs := g.GeneratePerFile(files, "/tmp/generated")
+
+	var requestContent string
+	for _, output := range outputs {
+		if output.Path == filepath.Join("/tmp/generated", "ticket", "request.ts") {
+			requestContent = output.Content
+			break
+		}
+	}
+
+	if !strings.Contains(requestContent, "import type { Filter as ReadmodelFilter } from '../readmodel/filter';") {
+		t.Fatalf("expected same-name readmodel alias import, got:\n%s", requestContent)
+	}
+	if !strings.Contains(requestContent, "export type Filter = ReadmodelFilter;") {
+		t.Fatalf("expected alias to renamed readmodel type, got:\n%s", requestContent)
+	}
+	if strings.Contains(requestContent, "export type Filter = Filter;") {
+		t.Fatalf("unexpected self-referential alias, got:\n%s", requestContent)
 	}
 }
 

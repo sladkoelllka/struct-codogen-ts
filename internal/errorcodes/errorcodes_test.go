@@ -12,7 +12,7 @@ func TestParsePath(t *testing.T) {
 
 	content := `package apperrs
 
-import "github.com/sladkoelllka/apihandler/errs"
+import "gitlab.legion.devel/common-backend/apihandler/errs"
 
 const (
 	CodeUserNotFound errs.ErrorCode = "USER_NOT_FOUND"

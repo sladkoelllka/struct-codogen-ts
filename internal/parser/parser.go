@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -35,6 +36,7 @@ func ParseFile(path string) (*File, error) {
 		Structs:  []Struct{},
 		Generate: true,
 	}
+	stringConstValues := collectStringConstValues(f)
 
 	for _, decl := range f.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
@@ -55,6 +57,18 @@ func ParseFile(path string) (*File, error) {
 					Fields:    []Field{},
 					Comment:   extractTypeComment(genDecl, typeSpec),
 					AliasType: typeToString(typeSpec.Type),
+				})
+				continue
+			}
+
+			if isStringType(typeSpec.Type) {
+				file.Structs = append(file.Structs, Struct{
+					Name:      typeSpec.Name.Name,
+					Package:   file.Package,
+					Fields:    []Field{},
+					Comment:   extractTypeComment(genDecl, typeSpec),
+					AliasType: "string",
+					Values:    stringConstValues[typeSpec.Name.Name],
 				})
 				continue
 			}
@@ -90,6 +104,74 @@ func ParseFile(path string) (*File, error) {
 	}
 
 	return file, nil
+}
+
+func collectStringConstValues(f *ast.File) map[string][]string {
+	result := map[string][]string{}
+
+	for _, decl := range f.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.CONST {
+			continue
+		}
+
+		var currentType string
+		for _, spec := range genDecl.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if valueSpec.Type != nil {
+				currentType = namedConstType(valueSpec.Type)
+			}
+			if currentType == "" {
+				continue
+			}
+
+			for i := range valueSpec.Names {
+				if i >= len(valueSpec.Values) {
+					continue
+				}
+				value, ok := stringLiteralValue(valueSpec.Values[i])
+				if !ok {
+					continue
+				}
+				result[currentType] = append(result[currentType], value)
+			}
+		}
+	}
+
+	return result
+}
+
+func namedConstType(expr ast.Expr) string {
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	if ident.Name == "string" {
+		return ""
+	}
+	return ident.Name
+}
+
+func isStringType(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	return ok && ident.Name == "string"
+}
+
+func stringLiteralValue(expr ast.Expr) (string, bool) {
+	basicLit, ok := expr.(*ast.BasicLit)
+	if !ok || basicLit.Kind != token.STRING {
+		return "", false
+	}
+
+	value, err := strconv.Unquote(basicLit.Value)
+	if err != nil {
+		return "", false
+	}
+
+	return value, true
 }
 
 func extractImports(f *ast.File) map[string]string {
