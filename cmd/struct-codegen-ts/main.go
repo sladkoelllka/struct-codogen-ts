@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"go/token"
 	"log"
 	"os"
 	"path/filepath"
@@ -219,7 +220,7 @@ func collectImportedStructFiles(primaryFiles []*parser.File) []*parser.File {
 				if seenPaths[depFile.Path] {
 					continue
 				}
-				if !fileHasPublicTaggedStruct(depFile) {
+				if !fileHasPublicType(depFile) {
 					continue
 				}
 				depFile = filterPublicStructFile(depFile)
@@ -242,7 +243,7 @@ func filterPublicStructFile(file *parser.File) *parser.File {
 	included := make(map[string]bool)
 	queue := make([]string, 0, len(file.Structs))
 	for _, strct := range file.Structs {
-		if !structHasPublicTaggedFields(strct) {
+		if !structHasPublicTaggedFields(strct) && !isPublicAliasType(strct) {
 			continue
 		}
 		included[strct.Name] = true
@@ -378,14 +379,18 @@ func usesImportedPackage(file *parser.File, importName string) bool {
 	return false
 }
 
-func fileHasPublicTaggedStruct(file *parser.File) bool {
+func fileHasPublicType(file *parser.File) bool {
 	for _, strct := range file.Structs {
-		if structHasPublicTaggedFields(strct) {
+		if structHasPublicTaggedFields(strct) || isPublicAliasType(strct) {
 			return true
 		}
 	}
 
 	return false
+}
+
+func isPublicAliasType(strct parser.Struct) bool {
+	return strct.AliasType != "" && token.IsExported(strct.Name)
 }
 
 func structHasPublicTaggedFields(strct parser.Struct) bool {
