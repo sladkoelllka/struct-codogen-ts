@@ -139,6 +139,7 @@ func (g *Generator) GeneratePerFile(files []*parser.File, outputDir string) []Fi
 	}
 
 	structToFile := buildStructToFileMap(files, outputDir)
+	schemas := newSchemaGenerator(files)
 
 	for _, file := range files {
 		if !file.Generate {
@@ -164,10 +165,10 @@ func (g *Generator) GeneratePerFile(files []*parser.File, outputDir string) []Fi
 		}
 
 		result = append(result, FileOutput{Path: filePath, Content: sb.String()})
-		if fileNeedsZod(file) {
+		if schemas.needsFile(file) {
 			result = append(result, FileOutput{
 				Path:    schemaOutputPathForFile(file, outputDir),
-				Content: generateSchemaFileContent(file),
+				Content: schemas.generate(file),
 			})
 		}
 	}
@@ -176,18 +177,7 @@ func (g *Generator) GeneratePerFile(files []*parser.File, outputDir string) []Fi
 }
 
 func generateSchemaFileContent(file *parser.File) string {
-	var sb strings.Builder
-	sb.WriteString(generatedHeader)
-	sb.WriteString("import { z } from 'zod';\n\n")
-
-	for _, strct := range file.Structs {
-		generateZodSchema(&sb, strct)
-		if structNeedsZod(strct) {
-			sb.WriteString("\n")
-		}
-	}
-
-	return sb.String()
+	return newSchemaGenerator([]*parser.File{file}).generate(file)
 }
 
 func stringUnionType(values []string) string {
@@ -604,11 +594,15 @@ func generateZodSchema(sb *strings.Builder, strct parser.Struct) {
 }
 
 func zodSchemaForField(field parser.Field) string {
+	return zodSchemaForFieldWithType(field, initialZodType)
+}
+
+func zodSchemaForFieldWithType(field parser.Field, initialType func(string, []bindingRule) string) string {
 	binding := parseBindingRules(field.Binding)
 	baseType := strings.TrimPrefix(field.Type, "*")
 	if strings.HasPrefix(baseType, "[]") {
 		itemType := strings.TrimPrefix(baseType, "[]")
-		itemSchema := applyBindingChain(initialZodType(itemType, binding.ItemRules), itemType, binding.ItemRules)
+		itemSchema := applyBindingChain(initialType(itemType, binding.ItemRules), itemType, binding.ItemRules)
 		schema := "z.array(" + itemSchema + ")"
 		schema = applyBindingChain(schema, baseType, binding.BaseRules)
 		if shouldOptionalize(field, binding) {
@@ -617,7 +611,7 @@ func zodSchemaForField(field parser.Field) string {
 		return schema
 	}
 
-	schema := initialZodType(baseType, binding.BaseRules)
+	schema := initialType(baseType, binding.BaseRules)
 	schema = applyBindingChain(schema, baseType, binding.BaseRules)
 	if shouldOptionalize(field, binding) {
 		schema += ".optional()"
