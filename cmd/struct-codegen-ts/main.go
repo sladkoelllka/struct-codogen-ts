@@ -182,56 +182,7 @@ func parseStructFile(path string) (*parser.File, bool) {
 }
 
 func collectImportedStructFiles(primaryFiles []*parser.File) []*parser.File {
-	var result []*parser.File
-	seenPaths := make(map[string]bool, len(primaryFiles))
-	seenDirs := make(map[string]bool, len(primaryFiles))
-	moduleCache := make(map[string]moduleInfo)
-
-	queue := append([]*parser.File(nil), primaryFiles...)
-	for _, file := range primaryFiles {
-		seenPaths[file.Path] = true
-		seenDirs[file.Dir] = true
-	}
-
-	for i := 0; i < len(queue); i++ {
-		file := queue[i]
-		module := cachedModuleInfo(file.Dir, moduleCache)
-		if module.Root == "" || module.Path == "" {
-			continue
-		}
-
-		for importName, importPath := range file.Imports {
-			if !usesImportedPackage(file, importName) {
-				continue
-			}
-
-			depDir := resolveImportDir(module, importPath)
-			if depDir == "" || seenDirs[depDir] {
-				continue
-			}
-
-			if _, err := os.Stat(depDir); err != nil {
-				continue
-			}
-
-			depFiles, _ := collectDirectoryFiles(depDir)
-			seenDirs[depDir] = true
-			for _, depFile := range depFiles {
-				if seenPaths[depFile.Path] {
-					continue
-				}
-				if !fileHasPublicType(depFile) {
-					continue
-				}
-				depFile = filterPublicStructFile(depFile)
-				seenPaths[depFile.Path] = true
-				result = append(result, depFile)
-				queue = append(queue, depFile)
-			}
-		}
-	}
-
-	return result
+	return collectReachableStructFiles(primaryFiles)
 }
 
 func filterPublicStructFile(file *parser.File) *parser.File {
